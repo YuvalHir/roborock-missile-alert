@@ -1,0 +1,203 @@
+# MAMAD Roborock — Missile Alert Auto-Cleaner
+
+Automatically triggers your Roborock vacuum whenever Pikud HaOref (Home Front Command) issues a missile/rocket alert for your area. The vacuum cleans a different room on each alert (round-robin), stops after a configurable duration, and returns to dock.
+
+Rooms named **Mamad / ממד / ממ״ד** are permanently excluded from the cycle — you need that room free during an alert.
+
+---
+
+## How it works
+
+1. Polls `oref.org.il` every 5 seconds for active alerts.
+2. On a matching alert → picks the next room in round-robin order → starts segment cleaning.
+3. After `clean_duration_minutes` (default: 10) → stops and returns to dock.
+4. State (room index, last-cleaned timestamps, credentials) is persisted in `mamad_state.json`.
+
+---
+
+## Requirements
+
+- Python 3.11+
+- A Roborock account (the same one used in the Roborock app)
+- A Roborock vacuum that has completed at least one mapping run
+
+---
+
+## Quickstart
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/your-username/roborock-missile-alert.git
+cd roborock-missile-alert
+```
+
+### 2. Create a virtual environment and install dependencies
+
+```bash
+python3 -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 3. Configure your areas
+
+Copy the config template and edit it:
+
+```bash
+cp config.yaml config.yaml   # it's already there, just open it
+```
+
+Open `config.yaml` and set the Hebrew area names you want to monitor:
+
+```yaml
+areas:
+  - "קדימה-צורן"
+  - "תל אביב"   # add as many as you need
+```
+
+All other settings have sensible defaults. See [Configuration](#configuration) below for the full reference.
+
+### 4. Run first-time setup
+
+```bash
+venv/bin/python mamad_roborock.py --setup
+```
+
+This will:
+- Ask for your Roborock account email
+- Send a verification code to that email
+- Ask you to enter the code
+- Discover your rooms and print them
+- Save credentials and room list to `mamad_state.json`
+
+Example output:
+```
+Enter your Roborock account email: you@example.com
+Enter the verification code sent to you@example.com: 123456
+
+Discovered 8 rooms:
+  id=   16  name=Kitchen
+  id=   17  name=Living room
+  id=   21  name=Mamad        ← automatically excluded from cleaning cycle
+  ...
+
+Setup complete. You can now start the daemon:
+  python mamad_roborock.py --config config.yaml
+```
+
+### 5. Start the daemon
+
+```bash
+venv/bin/python mamad_roborock.py
+```
+
+Watch the logs in a second terminal:
+
+```bash
+tail -f mamad.log
+```
+
+Stop with `Ctrl+C` — if the vacuum is cleaning it will be stopped and docked cleanly.
+
+---
+
+## Testing
+
+### Test vacuum control
+
+Clean one room for 30 seconds then dock (replace `16` with any room id from your setup output):
+
+```bash
+venv/bin/python mamad_roborock.py --test-clean 16
+```
+
+### Test alert detection
+
+Poll the alert API once and check whether your configured areas would match:
+
+```bash
+venv/bin/python mamad_roborock.py --test-alert
+```
+
+---
+
+## Run as a systemd service (Linux / Raspberry Pi)
+
+```bash
+# Copy and edit the unit file
+sudo cp mamad-roborock.service /etc/systemd/system/
+sudo nano /etc/systemd/system/mamad-roborock.service
+# Update User= and WorkingDirectory= / ExecStart= paths to match your setup
+
+sudo systemctl daemon-reload
+sudo systemctl enable mamad-roborock
+sudo systemctl start mamad-roborock
+
+# Check status
+sudo systemctl status mamad-roborock
+sudo journalctl -u mamad-roborock -f
+```
+
+---
+
+## Configuration
+
+All options live in `config.yaml` (excluded from git):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `areas` | *(required)* | List of Hebrew area/city name substrings to match against alerts |
+| `poll_seconds` | `5` | How often to poll the alert API |
+| `alert_types` | `["1"]` | Alert categories to react to (`"1"` = missiles/rockets) |
+| `clean_duration_minutes` | `10` | How long to clean per alert |
+| `fan_speed` | `balanced` | Fan speed: `quiet`, `balanced`, `turbo`, `max`, `max_plus` |
+| `exclude_rooms` | `[]` | Room name substrings to exclude from rotation (in addition to Mamad) |
+| `cooldown_hours` | `1` | Minimum hours between cleans of the same room |
+| `min_battery_percent` | `20` | Skip cleaning if battery is below this level |
+| `notifications.enabled` | `false` | Enable Telegram or ntfy notifications |
+| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `log_file` | `mamad.log` | Log file path (set to `""` for stdout only) |
+
+### Notifications (optional)
+
+**Telegram:**
+```yaml
+notifications:
+  enabled: true
+  provider: telegram
+  telegram:
+    bot_token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+```
+
+**ntfy:**
+```yaml
+notifications:
+  enabled: true
+  provider: ntfy
+  ntfy:
+    topic: "mamad-roborock"
+    server: "https://ntfy.sh"
+```
+
+---
+
+## State file
+
+`mamad_state.json` is auto-generated and stores:
+- Cached Roborock credentials (no re-login needed after setup)
+- Discovered rooms
+- Round-robin index
+- Per-room last-cleaned timestamps
+- Alert history
+
+The file is created with `chmod 600` (owner read/write only). It is excluded from git.
+
+---
+
+## Security notes
+
+- Credentials are stored locally in `mamad_state.json` with restricted permissions.
+- `config.yaml` and `mamad_state.json` are both in `.gitignore` — never committed.
+- The daemon never logs credentials.

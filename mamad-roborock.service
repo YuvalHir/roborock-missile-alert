@@ -1,0 +1,24 @@
+[Unit]
+Description=MAMAD Roborock Missile Alert Cleaner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/roborock-missile-alert
+ExecStart=/home/pi/roborock-missile-alert/venv/bin/python mamad_roborock.py --config config.yaml
+Restart=always
+RestartSec=10
+
+# Capture stdout/stderr to systemd journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mamad-roborock
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
