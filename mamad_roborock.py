@@ -83,27 +83,76 @@ def _load_config(path: str) -> Dict[str, Any]:
 # Interactive helpers
 # ---------------------------------------------------------------------------
 
-def _prompt_areas(existing: List[str] = None) -> List[str]:
-    """Interactively prompt the user to enter (or confirm) the alert areas."""
+def _prompt_areas(existing: List[str] = None, known_areas: List[str] = None) -> List[str]:
+    """
+    Interactively prompt for alert areas, collected one at a time.
+
+    When *known_areas* is provided and stdin is a TTY, prompt_toolkit supplies
+    inline autocomplete (match-middle, case-insensitive) so the user can type
+    a few characters of a Hebrew city name and tab-complete or arrow-select it.
+    Falls back to plain input() transparently if prompt_toolkit is unavailable
+    or stdin is not a terminal.
+    """
     print("\n--- Alert Areas ---")
-    print("Enter the Hebrew city/area names to watch for alerts.")
-    print("Substring matching is used — 'תל אביב' matches 'תל אביב - מרכז' too.")
-    print("Separate multiple areas with commas.")
-    print("Example: תל אביב, חיפה, באר שבע")
-    if existing:
-        print(f"\nCurrent areas: {', '.join(existing)}")
-        raw = input("Press Enter to keep, or type new areas: ").strip()
-        if not raw:
-            return existing
+
+    # Build autocomplete input function if possible
+    _pt_input = None
+    if known_areas:
+        try:
+            if sys.stdin.isatty():
+                from prompt_toolkit import prompt as _pt_prompt
+                from prompt_toolkit.completion import WordCompleter
+                _completer = WordCompleter(
+                    sorted(known_areas), match_middle=True, ignore_case=True
+                )
+                def _pt_input(msg: str) -> str:
+                    return _pt_prompt(msg, completer=_completer, complete_while_typing=True).strip()
+        except Exception:
+            pass
+
+    if _pt_input:
+        print("Start typing a city name — completions appear automatically.")
+        print("Tab or → to accept, ↑↓ to navigate, empty line to finish.")
     else:
-        raw = input("\nAreas: ").strip()
+        print("Enter Hebrew city/area names one at a time (substring matching applies).")
+        if known_areas:
+            print("Tip: run --list-areas --filter <text> to search for valid city names.")
+
+    def get_input(msg: str) -> str:
+        if _pt_input:
+            try:
+                return _pt_input(msg)
+            except (EOFError, KeyboardInterrupt):
+                return ""
+        return input(msg).strip()
+
+    known_lower = [k.lower() for k in known_areas] if known_areas else []
+    selected: List[str] = list(existing) if existing else []
+
+    if selected:
+        print(f"\nCurrent areas: {', '.join(selected)}")
+        print("Press Enter on an empty line to keep them, or add more below:")
 
     while True:
-        areas = [a.strip() for a in raw.split(",") if a.strip()]
-        if areas:
-            print(f"Monitoring: {', '.join(areas)}")
-            return areas
-        raw = input("At least one area is required. Areas: ").strip()
+        area = get_input(f"  Area {len(selected) + 1}: ")
+        if not area:
+            if selected:
+                break
+            print("  At least one area is required.")
+            continue
+        if area in selected:
+            print("  Already in list — skipping.")
+            continue
+        # Warn immediately if not matching any known city name
+        if known_lower and not any(area.lower() in k for k in known_lower):
+            close = [k for k in known_areas if any(c in k for c in area if len(c.encode()) > 1)][:4]
+            hint = f"  Closest: {', '.join(close)}" if close else ""
+            print(f"  WARNING: {area!r} doesn't match any known city — check spelling.{hint}")
+        selected.append(area)
+        print(f"  Added. ({len(selected)} area(s) selected so far)")
+
+    print(f"\nMonitoring: {', '.join(selected)}")
+    return selected
 
 
 async def _warn_unrecognized_areas(areas: List[str], session) -> None:
@@ -190,14 +239,10 @@ class MamadService:
         else:
             print("  Could not fetch city list — continuing without validation.")
 
-        areas = _prompt_areas(existing=self.scheduler.get_areas() or self.cfg.get("areas", []))
-
-        if known_areas:
-            bad = validate_configured_areas(areas, known_areas)
-            for area in bad:
-                suggestions = [k for k in known_areas if any(c in k for c in area if len(c.encode()) > 1)][:5]
-                hint = f"\n    Did you mean: {', '.join(suggestions)}" if suggestions else ""
-                print(f"  WARNING: {area!r} doesn't match any known city.{hint}")
+        areas = _prompt_areas(
+            existing=self.scheduler.get_areas() or self.cfg.get("areas", []),
+            known_areas=known_areas or None,
+        )
 
         self.scheduler.set_areas(areas)
         self.scheduler.save()
