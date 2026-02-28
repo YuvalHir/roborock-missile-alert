@@ -21,9 +21,10 @@ import signal
 import sys
 from typing import Dict, Any, List, Optional
 
+import aiohttp
 import yaml
 
-from alert_monitor import AlertMonitor
+from alert_monitor import AlertMonitor, fetch_known_areas, validate_configured_areas
 from notifications import Notifier
 from room_scheduler import RoomScheduler
 from vacuum_controller import (
@@ -105,6 +106,31 @@ def _prompt_areas(existing: List[str] = None) -> List[str]:
         raw = input("At least one area is required. Areas: ").strip()
 
 
+async def _warn_unrecognized_areas(areas: List[str], session) -> None:
+    """
+    Fetch the Pikud HaOref city list and log warnings for any configured area
+    that doesn't substring-match a known city name.
+    """
+    import aiohttp as _aiohttp
+    known = await fetch_known_areas(session)
+    if not known:
+        log.debug("_warn_unrecognized_areas: city list unavailable — skipping validation")
+        return
+    bad = validate_configured_areas(areas, known)
+    for area in bad:
+        # Find a few close matches to help the user
+        suggestions = [k for k in known if any(c in k for c in area if len(c.encode()) > 1)][:5]
+        hint = f"  Did you mean one of: {', '.join(suggestions)}" if suggestions else ""
+        log.warning(
+            "Configured area %r does not match any known Pikud HaOref city name "
+            "— alerts may never fire for this area.%s",
+            area,
+            hint,
+        )
+    if not bad:
+        log.info("Area validation OK — all configured areas matched known cities")
+
+
 # ---------------------------------------------------------------------------
 # Main service
 # ---------------------------------------------------------------------------
@@ -155,8 +181,24 @@ class MamadService:
         self.scheduler.set_cached_credentials(creds)
         self.scheduler.save()
 
-        # Areas setup
+        # Areas setup — show known cities before prompting so the user can verify spelling
+        print("\nFetching available city/area names from Pikud HaOref...")
+        async with aiohttp.ClientSession() as _sess:
+            known_areas = await fetch_known_areas(_sess)
+        if known_areas:
+            print(f"  {len(known_areas)} cities available (e.g. {', '.join(known_areas[:6])} …)")
+        else:
+            print("  Could not fetch city list — continuing without validation.")
+
         areas = _prompt_areas(existing=self.scheduler.get_areas() or self.cfg.get("areas", []))
+
+        if known_areas:
+            bad = validate_configured_areas(areas, known_areas)
+            for area in bad:
+                suggestions = [k for k in known_areas if any(c in k for c in area if len(c.encode()) > 1)][:5]
+                hint = f"\n    Did you mean: {', '.join(suggestions)}" if suggestions else ""
+                print(f"  WARNING: {area!r} doesn't match any known city.{hint}")
+
         self.scheduler.set_areas(areas)
         self.scheduler.save()
 
@@ -212,6 +254,10 @@ class MamadService:
             poll_seconds=int(self.cfg.get("poll_seconds", 5)),
             alert_types=self.cfg.get("alert_types", ["1"]),
         )
+
+        # Validate configured areas against the Pikud HaOref city list
+        async with aiohttp.ClientSession() as _session:
+            await _warn_unrecognized_areas(areas, _session)
 
         # Refresh rooms if cache is stale
         await self._refresh_rooms_if_stale()
@@ -446,6 +492,25 @@ async def _test_alert(cfg: Dict[str, Any], scheduler: "RoomScheduler") -> None:
         print("\n✗ This alert would NOT trigger cleaning.")
 
 
+async def _list_areas(filter_str: str = None) -> None:
+    """Fetch and print all Pikud HaOref city/area names, with optional substring filter."""
+    async with aiohttp.ClientSession() as session:
+        areas = await fetch_known_areas(session)
+
+    if not areas:
+        print("ERROR: Could not fetch area list from Pikud HaOref.")
+        return
+
+    if filter_str:
+        areas = [a for a in areas if filter_str.lower() in a.lower()]
+        print(f"Areas matching {filter_str!r} ({len(areas)} found):")
+    else:
+        print(f"All Pikud HaOref alert areas ({len(areas)} total):")
+
+    for area in sorted(areas):
+        print(f"  {area}")
+
+
 async def _async_main(args: argparse.Namespace) -> None:
     cfg = _load_config(args.config)
     _setup_logging(cfg)
@@ -454,6 +519,8 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     if args.setup:
         await service.run_setup()
+    elif args.list_areas:
+        await _list_areas(args.filter)
     elif args.test_clean is not None:
         await service.run_test_clean(args.test_clean)
     elif args.test_alert:
@@ -529,6 +596,17 @@ def main() -> None:
         "--test-alert",
         action="store_true",
         help="Poll the alert API once and show whether it matches your configured areas",
+    )
+    parser.add_argument(
+        "--list-areas",
+        action="store_true",
+        help="List all city/area names known to Pikud HaOref, then exit",
+    )
+    parser.add_argument(
+        "--filter",
+        metavar="TEXT",
+        default=None,
+        help="Substring filter for --list-areas (e.g. --filter תל)",
     )
     args = parser.parse_args()
 

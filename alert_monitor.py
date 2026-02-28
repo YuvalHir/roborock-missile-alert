@@ -15,6 +15,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 ALERTS_URL = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
+# Returns a JSON array of {"label": "<Hebrew city name>", "value": "..."} objects.
+CITIES_URL = "https://www.oref.org.il/Shared/Ajax/GetCitiesMix.aspx?lang=he"
 HEADERS = {
     "Referer": "https://www.oref.org.il/",
     "X-Requested-With": "XMLHttpRequest",
@@ -23,6 +25,46 @@ HEADERS = {
 
 # How many consecutive network failures before we warn loudly.
 _FAILURE_WARN_THRESHOLD = 5
+
+
+async def fetch_known_areas(session: aiohttp.ClientSession) -> List[str]:
+    """
+    Return the list of all city/area names recognised by Pikud HaOref.
+
+    The API returns a JSON array of objects; we extract the ``label`` field
+    (Hebrew name) from each entry.  On any failure an empty list is returned
+    so callers can treat the API as optional.
+    """
+    try:
+        async with session.get(
+            CITIES_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            resp.raise_for_status()
+            text = (await resp.text(encoding="utf-8-sig")).strip()
+        data = json.loads(text)
+        if not isinstance(data, list):
+            log.warning("fetch_known_areas: unexpected response type %s", type(data))
+            return []
+        return [item["label"] for item in data if isinstance(item, dict) and "label" in item]
+    except Exception as exc:
+        log.warning("fetch_known_areas: could not fetch city list: %s", exc)
+        return []
+
+
+def validate_configured_areas(configured: List[str], known: List[str]) -> List[str]:
+    """
+    Return the subset of *configured* area strings that do not match any known city.
+
+    Matching uses the same substring/case-insensitive rule as ``_matches_areas``:
+    a configured area is considered valid if it appears as a substring in at
+    least one known city name.  This means 'תל אביב' is valid because it
+    appears inside 'תל אביב - מרכז'.
+    """
+    known_lower = [k.lower() for k in known]
+    return [
+        area for area in configured
+        if not any(area.lower() in k for k in known_lower)
+    ]
 
 
 class AlertMonitor:
