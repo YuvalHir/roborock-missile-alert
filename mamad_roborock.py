@@ -83,72 +83,91 @@ def _load_config(path: str) -> Dict[str, Any]:
 # Interactive helpers
 # ---------------------------------------------------------------------------
 
+_FILTER_MAX_SHOWN = 8
+
+
 def _prompt_areas(existing: List[str] = None, known_areas: List[str] = None) -> List[str]:
     """
-    Interactively prompt for alert areas, one at a time.
+    Interactively prompt for alert areas using a type-to-filter + pick-by-number loop.
 
-    When *known_areas* is provided and stdin is a TTY, questionary supplies an
-    autocomplete prompt: type any substring of a Hebrew city name and a filtered
-    dropdown appears inline.  Falls back to plain input() if questionary is not
-    installed or stdin is not a terminal.
+    The user types any substring to filter the city list, then enters a number to
+    select from the shown matches.  An empty line finishes entry.  Works with plain
+    input() — no special terminal control or extra dependencies required.
+
+    When *known_areas* is None or empty, falls back to free-text entry.
     """
     print("\n--- Alert Areas ---")
 
-    _use_questionary = False
-    if known_areas and sys.stdin.isatty():
-        try:
-            import questionary  # noqa: F401 — just checking it's importable
-            _use_questionary = True
-        except ImportError:
-            pass
-
-    if _use_questionary:
-        print("Type any part of a city name — a filtered list appears as you type.")
-        print("↑↓ to navigate, Tab/→ to accept, Enter on empty line to finish.")
-    else:
-        print("Enter Hebrew city/area names one at a time (substring matching applies).")
-        if known_areas:
-            print("Tip: run --list-areas --filter <text> to search for valid city names.")
-
-    def get_input(msg: str) -> str:
-        if _use_questionary:
-            import questionary
-            try:
-                result = questionary.autocomplete(
-                    msg,
-                    choices=sorted(known_areas),
-                    match_middle=True,
-                    validate=lambda _: True,  # free-form entry still allowed
-                ).ask()
-                return (result or "").strip()
-            except (KeyboardInterrupt, EOFError):
-                return ""
-        return input(msg).strip()
-
-    known_lower = [k.lower() for k in known_areas] if known_areas else []
     selected: List[str] = list(existing) if existing else []
 
+    if not known_areas:
+        print("Enter Hebrew city/area names one at a time. Empty line to finish.")
+        if selected:
+            print(f"Current areas: {', '.join(selected)}")
+        while True:
+            area = input(f"  Area {len(selected) + 1}: ").strip()
+            if not area:
+                if selected:
+                    break
+                print("  At least one area is required.")
+                continue
+            if area not in selected:
+                selected.append(area)
+            print(f"  Added. ({len(selected)} selected so far)")
+        print(f"\nMonitoring: {', '.join(selected)}")
+        return selected
+
+    print("Type any part of a city name to filter, then enter its number to select.")
+    print("Empty line when done.\n")
+
     if selected:
-        print(f"\nCurrent areas: {', '.join(selected)}")
-        print("Press Enter on an empty line to keep them, or add more below:")
+        print(f"Current areas: {', '.join(selected)}")
+        print("Add more, or press Enter to keep them:\n")
+
+    current_matches: List[str] = []
 
     while True:
-        area = get_input(f"  Area {len(selected) + 1}: ")
-        if not area:
+        try:
+            raw = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not raw:
             if selected:
                 break
-            print("  At least one area is required.")
+            print("  At least one area is required.\n")
             continue
-        if area in selected:
-            print("  Already in list — skipping.")
+
+        # Number → select from the last shown matches
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if not current_matches:
+                print("  No matches to select from — type a filter first.\n")
+                continue
+            if not (0 <= idx < len(current_matches)):
+                print(f"  Enter a number between 1 and {len(current_matches)}.\n")
+                continue
+            area = current_matches[idx]
+            if area in selected:
+                print(f"  Already selected.\n")
+            else:
+                selected.append(area)
+                print(f"  ✓ Added: {area}  ({len(selected)} area(s) total)\n")
+            current_matches = []
             continue
-        # Warn immediately if the typed text doesn't match any known city
-        if known_lower and not any(area.lower() in k for k in known_lower):
-            close = [k for k in known_areas if any(c in k for c in area if len(c.encode()) > 1)][:4]
-            hint = f"  Closest: {', '.join(close)}" if close else ""
-            print(f"  WARNING: {area!r} doesn't match any known city — check spelling.{hint}")
-        selected.append(area)
-        print(f"  Added. ({len(selected)} area(s) selected so far)")
+
+        # Text → filter and display matches
+        current_matches = [a for a in known_areas if raw.lower() in a.lower()]
+        if not current_matches:
+            print(f"  No cities match '{raw}' — try different text.\n")
+            continue
+
+        shown = current_matches[:_FILTER_MAX_SHOWN]
+        for i, city in enumerate(shown, 1):
+            print(f"  {i}. {city}")
+        if len(current_matches) > _FILTER_MAX_SHOWN:
+            print(f"  … {len(current_matches) - _FILTER_MAX_SHOWN} more — type more characters to narrow down")
+        print()
 
     print(f"\nMonitoring: {', '.join(selected)}")
     return selected
