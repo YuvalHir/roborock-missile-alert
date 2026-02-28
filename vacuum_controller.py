@@ -47,7 +47,7 @@ _FAN_SPEED_MAP = {
 class VacuumController:
     """Async wrapper around python-roborock v4.x."""
 
-    def __init__(self, min_battery_percent: int = 20) -> None:
+    def __init__(self, min_battery_percent: int = 30) -> None:
         self.min_battery_percent = min_battery_percent
         self._email: str | None = None
         self._user_data: UserData | None = None

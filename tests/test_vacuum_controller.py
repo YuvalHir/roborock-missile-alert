@@ -74,7 +74,7 @@ def make_status_device(state_value=3, battery=80, error_value=0):
 class TestInit:
     def test_default_min_battery(self):
         vc = VacuumController()
-        assert vc.min_battery_percent == 20
+        assert vc.min_battery_percent == 30
 
     def test_custom_min_battery(self):
         vc = VacuumController(min_battery_percent=35)

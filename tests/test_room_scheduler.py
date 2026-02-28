@@ -186,6 +186,74 @@ class TestRoomCache:
 # Areas and email storage
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Rate limiting (max cleans per rolling window)
+# ---------------------------------------------------------------------------
+
+class TestRateLimit:
+    def test_room_blocked_after_max_cleans(self, state_file):
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=2, clean_window_hours=12)
+        rooms = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+        s.mark_cleaned(1)
+        s.mark_cleaned(1)
+        # Room 1 has hit the limit; only room 2 should be returned
+        for _ in range(4):
+            room = s.get_next_room(rooms)
+            assert room is not None
+            assert room["id"] == 2
+
+    def test_room_available_before_limit_reached(self, state_file):
+        # cooldown_hours=0 so the cooldown doesn't interfere with the rate-limit check
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=2, clean_window_hours=12,
+                          cooldown_hours=0)
+        rooms = [{"id": 1, "name": "A"}]
+        s.mark_cleaned(1)
+        # Only 1 clean so far — still under limit of 2
+        room = s.get_next_room(rooms)
+        assert room is not None
+        assert room["id"] == 1
+
+    def test_all_rooms_rate_limited_returns_none(self, state_file):
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=1, clean_window_hours=12)
+        rooms = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+        s.mark_cleaned(1)
+        s.mark_cleaned(2)
+        assert s.get_next_room(rooms) is None
+
+    def test_old_cleans_outside_window_not_counted(self, state_file):
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=1, clean_window_hours=12)
+        rooms = [{"id": 1, "name": "A"}]
+        # Manually plant a clean timestamp 13 hours ago
+        past = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+        s._state.setdefault("clean_history", {})["1"] = [past]
+        room = s.get_next_room(rooms)
+        assert room is not None
+        assert room["id"] == 1
+
+    def test_stale_history_pruned_on_count(self, state_file):
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=2, clean_window_hours=12)
+        past = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+        s._state.setdefault("clean_history", {})["1"] = [past, past]
+        s._clean_count_in_window(1)
+        assert s._state["clean_history"]["1"] == []
+
+    def test_zero_max_cleans_disables_rate_limit(self, state_file):
+        s = RoomScheduler(state_file=state_file, max_cleans_per_window=0, clean_window_hours=12)
+        rooms = [{"id": 1, "name": "A"}]
+        for _ in range(5):
+            s.mark_cleaned(1)
+        # Rate limit is disabled — room should still be returned (if not on cooldown)
+        s2 = RoomScheduler(state_file=state_file, max_cleans_per_window=0, clean_window_hours=12,
+                           cooldown_hours=0)
+        s2._state = s._state
+        room = s2.get_next_room(rooms)
+        assert room is not None
+
+
+# ---------------------------------------------------------------------------
+# Areas and email storage
+# ---------------------------------------------------------------------------
+
 class TestStoredConfig:
     def test_set_and_get_areas(self, scheduler):
         scheduler.set_areas(["תל אביב", "חיפה"])

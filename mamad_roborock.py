@@ -124,6 +124,8 @@ class MamadService:
             state_file=cfg.get("state_file", "mamad_state.json"),
             exclude_rooms=cfg.get("exclude_rooms", []),
             cooldown_hours=float(cfg.get("cooldown_hours", 1.0)),
+            max_cleans_per_window=int(cfg.get("max_cleans_per_room", 2)),
+            clean_window_hours=float(cfg.get("clean_window_hours", 12.0)),
         )
         self.vacuum = VacuumController(
             min_battery_percent=int(cfg.get("min_battery_percent", 20)),

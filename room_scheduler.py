@@ -52,11 +52,15 @@ class RoomScheduler:
         exclude_rooms: List[str] = None,
         cooldown_hours: float = 1.0,
         room_cache_hours: float = 24.0,
+        max_cleans_per_window: int = 2,
+        clean_window_hours: float = 12.0,
     ) -> None:
         self.state_file = state_file
         self.exclude_rooms = [r.lower() for r in (exclude_rooms or [])]
         self.cooldown_hours = cooldown_hours
         self.room_cache_hours = room_cache_hours
+        self.max_cleans_per_window = max_cleans_per_window
+        self.clean_window_hours = clean_window_hours
         self._state: Dict[str, Any] = {}
         self._load()
 
@@ -77,7 +81,7 @@ class RoomScheduler:
 
         eligible = self._eligible_rooms(rooms)
         if not eligible:
-            log.warning("All rooms are on cooldown or excluded — skipping")
+            log.warning("All rooms are on cooldown, rate-limited, or excluded — skipping")
             return None
 
         idx = self._state.get("round_robin_index", 0) % len(eligible)
@@ -89,8 +93,11 @@ class RoomScheduler:
 
     def mark_cleaned(self, room_id: int) -> None:
         """Record that *room_id* was just cleaned."""
+        now = _now_iso()
         last_cleaned = self._state.setdefault("last_cleaned", {})
-        last_cleaned[str(room_id)] = _now_iso()
+        last_cleaned[str(room_id)] = now
+        # Append to rate-limit history
+        self._state.setdefault("clean_history", {}).setdefault(str(room_id), []).append(now)
         self._state["total_alert_cleans"] = self._state.get("total_alert_cleans", 0) + 1
         log.info("Marked room %s as cleaned (total cleans: %d)", room_id, self._state["total_alert_cleans"])
 
@@ -187,6 +194,7 @@ class RoomScheduler:
             "discovered_rooms": [],
             "last_room_discovery": None,
             "last_cleaned": {},
+            "clean_history": {},
             "total_alert_cleans": 0,
             "last_alert_id": None,
             "last_alert_time": None,
@@ -199,8 +207,20 @@ class RoomScheduler:
     # should never be cleaned during an alert.
     _MAMAD_NAMES = {"mamad", "ממד", 'ממ"ד', "ממ״ד"}
 
+    def _clean_count_in_window(self, room_id: int) -> int:
+        """Return the number of times *room_id* was cleaned within clean_window_hours."""
+        history = self._state.get("clean_history", {}).get(str(room_id), [])
+        if not history:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.clean_window_hours)
+        recent = [ts for ts in history if (parsed := _parse_iso(ts)) is not None and parsed >= cutoff]
+        # Prune stale entries to keep the state file compact
+        if len(recent) != len(history):
+            self._state.setdefault("clean_history", {})[str(room_id)] = recent
+        return len(recent)
+
     def _eligible_rooms(self, rooms: List[Dict]) -> List[Dict]:
-        """Filter rooms: remove excluded names and rooms on cooldown."""
+        """Filter rooms: remove excluded names, rooms on cooldown, and rate-limited rooms."""
         now = datetime.now(timezone.utc)
         cooldown_delta = timedelta(hours=self.cooldown_hours)
         eligible = []
@@ -221,6 +241,15 @@ class RoomScheduler:
                 if last_ts and (now - last_ts) < cooldown_delta:
                     remaining = cooldown_delta - (now - last_ts)
                     log.debug("Room %s on cooldown for %.0f more minutes", name, remaining.total_seconds() / 60)
+                    continue
+            # Check rate limit (max cleans per rolling window)
+            if self.max_cleans_per_window > 0:
+                count = self._clean_count_in_window(room["id"])
+                if count >= self.max_cleans_per_window:
+                    log.debug(
+                        "Room %s rate-limited (%d/%d cleans in last %.0fh)",
+                        name, count, self.max_cleans_per_window, self.clean_window_hours,
+                    )
                     continue
             eligible.append(room)
         return eligible
