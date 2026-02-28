@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+venv/
+.venv/
+tests/
+mamad_state.json
+mamad.log
+config.yaml
+*.service

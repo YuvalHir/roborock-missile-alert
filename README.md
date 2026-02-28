@@ -15,6 +15,39 @@ Rooms named **Mamad / ממד / ממ״ד** are permanently excluded from the cycl
 
 ---
 
+## Quick Start with Docker
+
+No Python environment needed — just Docker.
+
+### With Docker Compose
+
+```bash
+# 1. Create data dir and copy config template
+mkdir data
+cp config.yaml data/config.yaml   # then edit data/config.yaml
+
+# 2. One-time interactive setup (Roborock login + area selection)
+docker compose run --rm mamad --setup
+
+# 3. Run daemon
+docker compose up -d
+
+# 4. View logs
+docker compose logs -f
+```
+
+The `data/` directory holds `config.yaml` (user-provided), `mamad_state.json` (auto-created), and `mamad.log` — all persisted across container restarts.
+
+### Without Compose
+
+```bash
+docker build -t mamad-roborock .
+docker run -it --rm -v ./data:/data mamad-roborock --setup
+docker run -d --restart=unless-stopped -v ./data:/data mamad-roborock
+```
+
+---
+
 ## Requirements
 
 - Python 3.11+

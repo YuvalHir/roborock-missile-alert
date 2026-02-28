@@ -1,0 +1,8 @@
+services:
+  mamad:
+    build: .
+    image: mamad-roborock
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    tty: true          # needed for --setup interactive input
