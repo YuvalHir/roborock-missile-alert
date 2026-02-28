@@ -65,12 +65,13 @@ class AlertMonitor:
                     self._consecutive_failures += 1
                     if self._consecutive_failures >= _FAILURE_WARN_THRESHOLD:
                         log.error(
-                            "AlertMonitor: %d consecutive failures — last error: %s",
+                            "AlertMonitor: %d consecutive failures — last error: %s: %s",
                             self._consecutive_failures,
-                            exc,
+                            type(exc).__name__,
+                            exc or "(no message)",
                         )
                     else:
-                        log.warning("AlertMonitor poll error: %s", exc)
+                        log.warning("AlertMonitor poll error: %s: %s", type(exc).__name__, exc or "(no message)")
                 else:
                     self._consecutive_failures = 0
                 await asyncio.sleep(self.poll_seconds)
