@@ -98,8 +98,8 @@ class TestAreaMatching:
 
     @pytest.mark.asyncio
     async def test_partial_area_match(self):
-        m = make_monitor(areas=["קדימה"])
-        payload = json.dumps({"id": "1", "cat": "1", "data": ["קדימה-צורן"]})
+        m = make_monitor(areas=["חיפה"])
+        payload = json.dumps({"id": "1", "cat": "1", "data": ["חיפה-כרמל"]})
         session = make_session_mock(payload)
         result = await m._poll(session)
         assert result is not None

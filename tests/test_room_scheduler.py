@@ -197,7 +197,7 @@ class TestStoredConfig:
 
     def test_areas_persisted(self, state_file):
         s = RoomScheduler(state_file=state_file)
-        s.set_areas(["קדימה"])
+        s.set_areas(["תל אביב"])
         s.save()
         s2 = RoomScheduler(state_file=state_file)
-        assert s2.get_areas() == ["קדימה"]
+        assert s2.get_areas() == ["תל אביב"]

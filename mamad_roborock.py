@@ -86,9 +86,9 @@ def _prompt_areas(existing: List[str] = None) -> List[str]:
     """Interactively prompt the user to enter (or confirm) the alert areas."""
     print("\n--- Alert Areas ---")
     print("Enter the Hebrew city/area names to watch for alerts.")
-    print("Substring matching is used — 'קדימה' matches 'קדימה-צורן' too.")
+    print("Substring matching is used — 'תל אביב' matches 'תל אביב - מרכז' too.")
     print("Separate multiple areas with commas.")
-    print("Example: קדימה-צורן, תל אביב, חיפה")
+    print("Example: תל אביב, חיפה, באר שבע")
     if existing:
         print(f"\nCurrent areas: {', '.join(existing)}")
         raw = input("Press Enter to keep, or type new areas: ").strip()

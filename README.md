@@ -40,41 +40,30 @@ source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure your areas
-
-Copy the config template and edit it:
-
-```bash
-cp config.yaml config.yaml   # it's already there, just open it
-```
-
-Open `config.yaml` and set the Hebrew area names you want to monitor:
-
-```yaml
-areas:
-  - "קדימה-צורן"
-  - "תל אביב"   # add as many as you need
-```
-
-All other settings have sensible defaults. See [Configuration](#configuration) below for the full reference.
-
-### 4. Run first-time setup
+### 3. Run first-time setup
 
 ```bash
 venv/bin/python mamad_roborock.py --setup
 ```
 
-This will:
+This will interactively:
 - Ask for your Roborock account email
-- Send a verification code to that email
-- Ask you to enter the code
+- Send a verification code to that email and ask you to enter it
+- Ask which Hebrew city/area names you want to monitor for alerts
 - Discover your rooms and print them
-- Save credentials and room list to `mamad_state.json`
+- Save everything to `mamad_state.json`
 
-Example output:
+Example:
 ```
 Enter your Roborock account email: you@example.com
 Enter the verification code sent to you@example.com: 123456
+
+--- Alert Areas ---
+Enter the Hebrew city/area names to watch for alerts.
+Substring matching is used — 'תל אביב' matches 'תל אביב - מרכז' too.
+Separate multiple areas with commas.
+
+Areas: תל אביב, חיפה
 
 Discovered 8 rooms:
   id=   16  name=Kitchen
@@ -83,8 +72,16 @@ Discovered 8 rooms:
   ...
 
 Setup complete. You can now start the daemon:
-  python mamad_roborock.py --config config.yaml
+  python mamad_roborock.py
 ```
+
+You can re-run `--setup` at any time to change your email or monitored areas.
+
+### 4. (Optional) Tweak settings
+
+Open `config.yaml` to adjust things like poll interval, fan speed, clean duration, notifications, and more. All settings have sensible defaults — you don't need to change anything to get started.
+
+See [Configuration](#configuration) below for the full reference.
 
 ### 5. Start the daemon
 
