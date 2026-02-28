@@ -85,44 +85,43 @@ def _load_config(path: str) -> Dict[str, Any]:
 
 def _prompt_areas(existing: List[str] = None, known_areas: List[str] = None) -> List[str]:
     """
-    Interactively prompt for alert areas, collected one at a time.
+    Interactively prompt for alert areas, one at a time.
 
-    When *known_areas* is provided and stdin is a TTY, prompt_toolkit supplies
-    inline autocomplete (match-middle, case-insensitive) so the user can type
-    a few characters of a Hebrew city name and tab-complete or arrow-select it.
-    Falls back to plain input() transparently if prompt_toolkit is unavailable
-    or stdin is not a terminal.
+    When *known_areas* is provided and stdin is a TTY, questionary supplies an
+    autocomplete prompt: type any substring of a Hebrew city name and a filtered
+    dropdown appears inline.  Falls back to plain input() if questionary is not
+    installed or stdin is not a terminal.
     """
     print("\n--- Alert Areas ---")
 
-    # Build autocomplete input function if possible
-    _pt_input = None
-    if known_areas:
+    _use_questionary = False
+    if known_areas and sys.stdin.isatty():
         try:
-            if sys.stdin.isatty():
-                from prompt_toolkit import prompt as _pt_prompt
-                from prompt_toolkit.completion import WordCompleter
-                _completer = WordCompleter(
-                    sorted(known_areas), match_middle=True, ignore_case=True
-                )
-                def _pt_input(msg: str) -> str:
-                    return _pt_prompt(msg, completer=_completer, complete_while_typing=True).strip()
-        except Exception:
+            import questionary  # noqa: F401 — just checking it's importable
+            _use_questionary = True
+        except ImportError:
             pass
 
-    if _pt_input:
-        print("Start typing a city name — completions appear automatically.")
-        print("Tab or → to accept, ↑↓ to navigate, empty line to finish.")
+    if _use_questionary:
+        print("Type any part of a city name — a filtered list appears as you type.")
+        print("↑↓ to navigate, Tab/→ to accept, Enter on empty line to finish.")
     else:
         print("Enter Hebrew city/area names one at a time (substring matching applies).")
         if known_areas:
             print("Tip: run --list-areas --filter <text> to search for valid city names.")
 
     def get_input(msg: str) -> str:
-        if _pt_input:
+        if _use_questionary:
+            import questionary
             try:
-                return _pt_input(msg)
-            except (EOFError, KeyboardInterrupt):
+                result = questionary.autocomplete(
+                    msg,
+                    choices=sorted(known_areas),
+                    match_middle=True,
+                    validate=lambda _: True,  # free-form entry still allowed
+                ).ask()
+                return (result or "").strip()
+            except (KeyboardInterrupt, EOFError):
                 return ""
         return input(msg).strip()
 
@@ -143,7 +142,7 @@ def _prompt_areas(existing: List[str] = None, known_areas: List[str] = None) -> 
         if area in selected:
             print("  Already in list — skipping.")
             continue
-        # Warn immediately if not matching any known city name
+        # Warn immediately if the typed text doesn't match any known city
         if known_lower and not any(area.lower() in k for k in known_lower):
             close = [k for k in known_areas if any(c in k for c in area if len(c.encode()) > 1)][:4]
             hint = f"  Closest: {', '.join(close)}" if close else ""
