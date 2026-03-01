@@ -13,11 +13,7 @@ import logging
 from typing import Dict, Any, List
 
 from dreame.device import DreameVacuumDevice
-from dreame.types import (
-    DreameVacuumState,
-    DreameVacuumProperty,
-    DreameVacuumAction,
-)
+from dreame.types import DreameVacuumCleaningMode
 from dreame.protocol import DreameVacuumProtocol
 
 log = logging.getLogger(__name__)
@@ -28,13 +24,16 @@ STATUS_ALREADY_CLEANING = "already_cleaning"
 STATUS_LOW_BATTERY = "low_battery"
 STATUS_ERROR = "error"
 
-# States that count as actively cleaning (from Tasshack's dreame integration)
-_CLEANING_STATES = {
-    DreameVacuumState.CLEANING,
-    DreameVacuumState.ZONE_CLEANING,
-    DreameVacuumState.SEGMENT_CLEANING,
-    DreameVacuumState.SPOT_CLEANING,
-    DreameVacuumState.CUSTOM_CLEANING,
+# State names that count as actively cleaning.
+_CLEANING_STATE_NAMES = {
+    "CLEANING",
+    "ZONE_CLEANING",
+    "SEGMENT_CLEANING",
+    "SPOT_CLEANING",
+    "CUSTOM_CLEANING",
+    "PART_CLEANING",
+    "SWEEPING",
+    "SWEEPING_AND_MOPPING",
 }
 
 class DreameController:
@@ -45,6 +44,7 @@ class DreameController:
         self._username: str | None = None
         self._password: str | None = None
         self._country: str | None = None
+        self._account_type: str = "mi"
         self._device: DreameVacuumDevice | None = None
         self._host: str | None = None
         self._token: str | None = None
@@ -58,6 +58,7 @@ class DreameController:
         username: str,
         password: str = None,
         country: str = "cn",
+        account_type: str = "mi",
         cached_credentials: Dict = None,
         interactive: bool = True,
     ) -> Dict:
@@ -66,9 +67,11 @@ class DreameController:
         """
         self._username = username
         self._country = country
+        self._account_type = account_type or "mi"
 
         if cached_credentials:
-            self._password = cached_credentials.get("password")
+            if not self._password:
+                self._password = cached_credentials.get("password")
             self._host = cached_credentials.get("host")
             self._token = cached_credentials.get("token")
             log.info("Restored Dreame session from cache")
@@ -91,6 +94,7 @@ class DreameController:
             "username": self._username,
             "password": self._password,
             "country": self._country,
+            "account_type": self._account_type,
             "host": self._host,
             "token": self._token
         }
@@ -104,55 +108,88 @@ class DreameController:
         if not self._username or not self._password:
             raise RuntimeError("Call setup() before discover_devices()")
 
-        # For this standalone controller without HA config flow, we initiate
-        # DreameVacuumProtocol to fetch device lists from cloud.
         protocol = DreameVacuumProtocol(
             username=self._username,
             password=self._password,
             country=self._country,
-            account_type="mi"
+            account_type=self._account_type,
+            prefer_cloud=True,
         )
+        cloud = protocol.cloud
+        if cloud is None:
+            raise RuntimeError("Dreame cloud protocol unavailable")
 
         try:
-            log.info("Logging into cloud...")
-            await asyncio.get_event_loop().run_in_executor(None, protocol.login)
+            log.info("Logging into cloud (country=%s, account_type=%s)...", self._country, self._account_type)
+            logged_in = await asyncio.get_event_loop().run_in_executor(None, cloud.login)
+            if not logged_in:
+                raise RuntimeError(
+                    f"Dreame cloud login failed (country={self._country}, account_type={self._account_type})."
+                )
             log.info("Fetching devices...")
-            devices = await asyncio.get_event_loop().run_in_executor(None, protocol.get_devices)
+            devices = await asyncio.get_event_loop().run_in_executor(None, cloud.get_devices)
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch devices from cloud: {exc}")
 
-        if not devices:
+        device_list = []
+        if isinstance(devices, list):
+            device_list = [d for d in devices if isinstance(d, dict)]
+        elif isinstance(devices, dict):
+            page = devices.get("page")
+            if isinstance(page, dict) and isinstance(page.get("records"), list):
+                device_list = [d for d in page["records"] if isinstance(d, dict)]
+            elif isinstance(devices.get("list"), list):
+                device_list = [d for d in devices["list"] if isinstance(d, dict)]
+
+        if not device_list:
             raise RuntimeError("No Dreame devices found on this account")
 
-        # Pick the first device
-        device_info = devices[0]
+        device_info = device_list[0]
+        did = device_info.get("did")
+        mac = device_info.get("mac") or device_info.get("MAC")
         self._host = device_info.get("localip")
         self._token = device_info.get("token")
 
+        if not self._host:
+            if mac:
+                token, host = await asyncio.get_event_loop().run_in_executor(None, cloud.get_info, str(mac))
+                self._host = host
+                self._token = token
+            elif did:
+                cloud._did = str(did)
+                info = await asyncio.get_event_loop().run_in_executor(None, cloud.get_device_info)
+                if isinstance(info, dict):
+                    self._host = info.get("host")
+                # Dreame account cloud path does not require local 32-char token.
+                self._token = self._token or " "
+
         name = device_info.get("name", "Unknown Dreame Vacuum")
-        mac = device_info.get("mac", "")
+        mac = mac or ""
+
+        if not self._host:
+            raise RuntimeError("Failed to resolve device host from cloud")
 
         log.info("Using device: %s (host=%s)", name, self._host)
 
         self._device = DreameVacuumDevice(
             name=name,
             host=self._host,
-            token=self._token,
+            token=self._token or " ",
             mac=mac,
             username=self._username,
             password=self._password,
             country=self._country,
             prefer_cloud=True,
-            account_type="mi",
-            device_id=device_info.get("did")
+            account_type=self._account_type,
+            device_id=did,
         )
 
         try:
             log.info("Connecting to device and updating properties...")
             await asyncio.get_event_loop().run_in_executor(None, self._device.update)
-            # Fetch maps
-            if self._device.map_manager:
-                await asyncio.get_event_loop().run_in_executor(None, self._device.map_manager.update)
+            map_manager = getattr(self._device, "map_manager", None)
+            if map_manager:
+                await asyncio.get_event_loop().run_in_executor(None, map_manager.update)
         except Exception as exc:
             log.warning("Initial device connection error: %s", exc)
 
@@ -163,14 +200,15 @@ class DreameController:
         if self._device is None:
             raise RuntimeError("Call discover_devices() before discover_rooms()")
 
-        if not self._device.map_manager or not self._device.status.current_map:
+        current_map = self._device.status.current_map
+        if not current_map:
             log.warning("No map found on device. Returning empty room list.")
             return []
 
         rooms = []
         try:
             # Map elements
-            for seg_id, segment in self._device.status.current_map.segments.items():
+            for seg_id, segment in (current_map.segments or {}).items():
                 rooms.append({"id": seg_id, "name": segment.name or f"Room {seg_id}"})
 
             log.info(
@@ -203,8 +241,6 @@ class DreameController:
         has_error = self._device.status.has_error
 
         state_name = state.name if state else "unknown"
-        state_value = state.value if state else 0
-
         log.debug(
             "Vacuum status: state=%s battery=%d error=%s",
             state_name, battery, has_error
@@ -212,7 +248,7 @@ class DreameController:
 
         if has_error:
             result = STATUS_ERROR
-        elif state in _CLEANING_STATES:
+        elif state_name in _CLEANING_STATE_NAMES:
             result = STATUS_ALREADY_CLEANING
         elif battery < self.min_battery_percent:
             result = STATUS_LOW_BATTERY
@@ -226,12 +262,37 @@ class DreameController:
             "result": result,
         }
 
-    async def start_segment_clean(self, segment_id: int, fan_speed: str = "balanced") -> None:
+    async def start_segment_clean(
+        self,
+        segment_id: int,
+        fan_speed: str = "balanced",
+        cleaning_profile: str = "auto",
+    ) -> None:
         """Start cleaning a single segment (room)."""
         if self._device is None:
             raise RuntimeError("Call discover_devices() first")
 
-        log.info("Starting segment clean: segment_id=%d", segment_id)
+        profile = (cleaning_profile or "auto").strip().lower()
+        log.info("Starting segment clean: segment_id=%d profile=%s", segment_id, profile)
+
+        mode_map = {
+            "vacuum_only": DreameVacuumCleaningMode.SWEEPING.value,
+            "mop_only": DreameVacuumCleaningMode.MOPPING.value,
+            "vacuum_and_mop": DreameVacuumCleaningMode.SWEEPING_AND_MOPPING.value,
+            "mop_after_vacuum": DreameVacuumCleaningMode.MOPPING_AFTER_SWEEPING.value,
+        }
+
+        if profile in mode_map:
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self._device.set_cleaning_mode,
+                    mode_map[profile],
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Failed to apply cleaning profile '{profile}': {exc}") from exc
+        elif profile != "auto":
+            log.warning("Unknown cleaning profile '%s' — using current robot mode", profile)
 
         # Mapping from string to the integer values if applicable
         # The Tasshack library usually accepts ints, but we can pass suction_level mapped
