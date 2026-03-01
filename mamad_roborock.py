@@ -14,6 +14,7 @@ Modes:
 
 import argparse
 import asyncio
+import json
 import logging
 import logging.handlers
 import os
@@ -24,7 +25,14 @@ from typing import Dict, Any, List, Optional
 import aiohttp
 import yaml
 
-from alert_monitor import AlertMonitor, fetch_known_areas, validate_configured_areas
+from alert_monitor import (
+    AlertMonitor,
+    fetch_known_areas,
+    validate_configured_areas,
+    TEST_CITY_TOKEN,
+    _cache_bust_url,
+    _decode_response,
+)
 from notifications import Notifier
 from room_scheduler import RoomScheduler
 from vacuum_controller import (
@@ -173,29 +181,32 @@ def _prompt_areas(existing: List[str] = None, known_areas: List[str] = None) -> 
     return selected
 
 
-async def _warn_unrecognized_areas(areas: List[str], session) -> None:
+async def _filter_valid_areas(areas: List[str], session) -> List[str]:
     """
-    Fetch the Pikud HaOref city list and log warnings for any configured area
-    that doesn't substring-match a known city name.
+    Validate *areas* against the Pikud HaOref city list.
+
+    Returns the subset of areas that are valid (or could not be checked).
+    Logs a warning for each dropped area with candidate suggestions.
+    TEST_CITY_TOKEN is always kept — it is not a real city but is intentional.
     """
-    import aiohttp as _aiohttp
     known = await fetch_known_areas(session)
     if not known:
-        log.debug("_warn_unrecognized_areas: city list unavailable — skipping validation")
-        return
-    bad = validate_configured_areas(areas, known)
+        log.debug("_filter_valid_areas: city list unavailable — keeping all areas as-is")
+        return list(areas)
+    bad = set(validate_configured_areas(areas, known))
+    bad.discard(TEST_CITY_TOKEN)  # always keep — it's an intentional test token
+    if not bad:
+        log.info("Area validation OK — all configured areas matched known cities")
+        return list(areas)
     for area in bad:
-        # Find a few close matches to help the user
         suggestions = [k for k in known if any(c in k for c in area if len(c.encode()) > 1)][:5]
         hint = f"  Did you mean one of: {', '.join(suggestions)}" if suggestions else ""
         log.warning(
-            "Configured area %r does not match any known Pikud HaOref city name "
-            "— alerts may never fire for this area.%s",
+            "Dropping unrecognized area %r — not found in Pikud HaOref city list.%s",
             area,
             hint,
         )
-    if not bad:
-        log.info("Area validation OK — all configured areas matched known cities")
+    return [a for a in areas if a not in bad]
 
 
 # ---------------------------------------------------------------------------
@@ -312,15 +323,35 @@ class MamadService:
                 "ERROR: No alert areas configured.\n"
                 "Run setup first:  python mamad_roborock.py --setup"
             )
+
+        # Test mode: also react to Pikud HaOref's own scheduled test drills.
+        # The live API continuously fires alerts whose city name contains "בדיקה".
+        # Most client libraries filter these out; we opt-in here to use them as
+        # a free real-API end-to-end test without waiting for a real event.
+        if self.cfg.get("test_mode"):
+            if TEST_CITY_TOKEN not in areas:
+                areas = list(areas) + [TEST_CITY_TOKEN]
+            log.warning(
+                "TEST MODE — also watching for Pikud HaOref test drills "
+                "(city contains '%s'). Disable with Ctrl-C when done testing.",
+                TEST_CITY_TOKEN,
+            )
+
+        # Validate and filter areas against the Pikud HaOref city list
+        async with aiohttp.ClientSession() as _session:
+            areas = await _filter_valid_areas(areas, _session)
+
+        if not areas:
+            sys.exit(
+                "ERROR: No valid alert areas remain after validation.\n"
+                "Run setup again:  python mamad_roborock.py --setup"
+            )
+
         self.alert_monitor = AlertMonitor(
             areas=areas,
             poll_seconds=int(self.cfg.get("poll_seconds", 5)),
             alert_types=self.cfg.get("alert_types", ["1"]),
         )
-
-        # Validate configured areas against the Pikud HaOref city list
-        async with aiohttp.ClientSession() as _session:
-            await _warn_unrecognized_areas(areas, _session)
 
         # Refresh rooms if cache is stale
         await self._refresh_rooms_if_stale()
@@ -511,7 +542,7 @@ async def _test_alert(cfg: Dict[str, Any], scheduler: "RoomScheduler") -> None:
     """Poll the alert API once and show exactly what was returned."""
     import json
     import aiohttp
-    from alert_monitor import ALERTS_URL, HEADERS
+    from alert_monitor import ALERTS_URL, HEADERS, _cache_bust_url, _decode_response
 
     areas = cfg.get("areas") or scheduler.get_areas()
     if not areas:
@@ -522,8 +553,9 @@ async def _test_alert(cfg: Dict[str, Any], scheduler: "RoomScheduler") -> None:
     print(f"Watching areas: {areas}\n")
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(ALERTS_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            text = (await resp.text(encoding="utf-8-sig")).strip()
+        async with session.get(_cache_bust_url(ALERTS_URL), headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            raw = await resp.read()
+            text = _decode_response(raw).strip()
 
     if not text:
         print("No active alert (empty response).")
@@ -580,12 +612,17 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     service = MamadService(cfg)
 
+    if args.test_mode:
+        cfg["test_mode"] = True
+
     if args.setup:
         await service.run_setup()
     elif args.list_areas:
         await _list_areas(args.filter)
     elif args.test_clean is not None:
         await service.run_test_clean(args.test_clean)
+    elif args.inject_alert:
+        await service.run_inject_alert(args.inject_alert)
     elif args.test_alert:
         await _test_alert(cfg, service.scheduler)
     else:
@@ -634,6 +671,66 @@ async def _run_test_clean(self, room_id: int) -> None:
 MamadService.run_test_clean = _run_test_clean
 
 
+async def _run_inject_alert(self, city: str) -> None:
+    """
+    Inject a synthetic alert for *city* and run the full on_alert() pipeline.
+
+    Unlike --test-clean (which skips the alert logic), this exercises the
+    complete chain: status check → room scheduler → start_segment_clean →
+    clean duration → stop_and_dock → mark_cleaned.
+
+    Tip: set clean_duration_minutes to 0.5 in config.yaml for a quick test.
+    """
+    print(f"\nInjecting synthetic alert for city: '{city}'")
+    print("This runs the full alert → vacuum pipeline.\n")
+
+    email = self.scheduler.get_email()
+    if not email:
+        sys.exit("ERROR: Run --setup first")
+
+    creds = await self.vacuum.setup(
+        email=email,
+        cached_credentials=self.scheduler.get_cached_credentials(),
+        interactive=False,
+    )
+    self.scheduler.set_cached_credentials(creds)
+    self.scheduler.save()
+
+    await self.vacuum.discover_devices()
+    await self._refresh_rooms_if_stale()
+
+    if not self.rooms:
+        sys.exit("ERROR: No rooms in cache — run --setup first")
+
+    print(f"Rooms in rotation: {[(r['id'], r['name']) for r in self.rooms]}")
+    print(f"Clean duration: {self.cfg.get('clean_duration_minutes', 10)} min "
+          f"(set clean_duration_minutes in config.yaml to shorten for testing)\n")
+
+    alert = {
+        "id": "SYNTHETIC-TEST-001",
+        "cat": "1",
+        "title": "ירי רקטות וטילים [TEST]",
+        "data": [city],
+        "desc": "Injected by --inject-alert for local testing",
+    }
+    log.info("Injecting synthetic alert: %s", json.dumps(alert, ensure_ascii=False))
+
+    await self.on_alert(alert)
+
+    if not self.cleaning_task:
+        print("\nAlert was received but no cleaning started — check the log for the reason.")
+        print("Common causes: vacuum not ready, no eligible rooms, city didn't match configured areas.")
+    else:
+        print("Cleaning task started — waiting for it to finish...")
+        await self.cleaning_task
+        print("\nDone.")
+
+    await self.vacuum.close()
+
+
+MamadService.run_inject_alert = _run_inject_alert
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="MAMAD Roborock — Missile Alert Auto-Cleaner"
@@ -654,6 +751,26 @@ def main() -> None:
         type=int,
         metavar="ROOM_ID",
         help="Clean a room for 30 s then dock (e.g. --test-clean 16 for Kitchen)",
+    )
+    parser.add_argument(
+        "--test-mode",
+        action="store_true",
+        help=(
+            "Run the daemon in test mode: also react to Pikud HaOref's own scheduled "
+            "test drills (city name contains 'בדיקה'). These fire continuously on the "
+            "live API. Use this to verify the full alert → vacuum pipeline with real "
+            "API traffic. Watch the log with: tail -f mamad.log"
+        ),
+    )
+    parser.add_argument(
+        "--inject-alert",
+        metavar="CITY",
+        default=None,
+        help=(
+            "Inject a synthetic alert for CITY and run the full alert → vacuum pipeline. "
+            "Use a city name that matches your configured areas, e.g. --inject-alert קדימה-צורן. "
+            "Tip: set clean_duration_minutes: 0.5 in config.yaml for a 30-second test clean."
+        ),
     )
     parser.add_argument(
         "--test-alert",

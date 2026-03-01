@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from alert_monitor import AlertMonitor, fetch_known_areas, validate_configured_areas
+from alert_monitor import AlertMonitor, fetch_known_areas, validate_configured_areas, _decode_response, _cache_bust_url
 
 
 def make_monitor(areas=None, alert_types=None):
@@ -23,7 +23,7 @@ def make_session_mock(text: str):
     """Return an aiohttp ClientSession mock that yields *text* on GET."""
     resp = AsyncMock()
     resp.raise_for_status = MagicMock()
-    resp.text = AsyncMock(return_value=text)
+    resp.read = AsyncMock(return_value=text.encode("utf-8"))
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=False)
 
@@ -275,3 +275,57 @@ class TestValidateConfiguredAreas:
         # (callers skip validation), but the function itself flags all areas.
         bad = validate_configured_areas(["חיפה"], [])
         assert "חיפה" in bad
+
+
+# ---------------------------------------------------------------------------
+# _decode_response — encoding edge cases
+# ---------------------------------------------------------------------------
+
+class TestDecodeResponse:
+    def test_plain_utf8(self):
+        raw = "hello".encode("utf-8")
+        assert _decode_response(raw) == "hello"
+
+    def test_utf8_bom_stripped(self):
+        raw = b"\xef\xbb\xbf" + "שלום".encode("utf-8")
+        assert _decode_response(raw) == "שלום"
+
+    def test_utf16_le_bom(self):
+        raw = "שלום".encode("utf-16-le")
+        raw = b"\xff\xfe" + raw
+        assert "שלום" in _decode_response(raw)
+
+    def test_nul_chars_stripped(self):
+        raw = b'{"id": "1"\x00, "cat": "1"}'
+        result = _decode_response(raw)
+        assert "\x00" not in result
+        assert '"id": "1"' in result
+
+    def test_empty_bytes(self):
+        assert _decode_response(b"") == ""
+
+
+# ---------------------------------------------------------------------------
+# Cache-bust URL parameter
+# ---------------------------------------------------------------------------
+
+class TestCacheBustUrl:
+    @pytest.mark.asyncio
+    async def test_poll_uses_cache_bust_param(self):
+        """session.get must receive a URL with a ?<timestamp> cache-bust query param."""
+        m = make_monitor()
+        payload = json.dumps({"id": "1", "cat": "1", "data": ["תל אביב"]})
+        session = make_session_mock(payload)
+        await m._poll(session)
+        url_called = session.get.call_args[0][0]
+        assert "?" in url_called, f"Expected cache-bust param in URL, got: {url_called}"
+
+    def test_url_without_query_uses_question_mark(self):
+        result = _cache_bust_url("https://example.com/path")
+        assert "?" in result
+        assert "??" not in result
+
+    def test_url_with_existing_query_uses_ampersand(self):
+        result = _cache_bust_url("https://example.com/path?lang=he")
+        assert "&" in result
+        assert "??" not in result

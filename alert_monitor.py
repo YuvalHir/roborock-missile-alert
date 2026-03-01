@@ -8,23 +8,51 @@ Invokes the registered async callback when a new matching alert is detected.
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Awaitable, List
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
-ALERTS_URL = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
+ALERTS_URL = "https://www.oref.org.il/warningMessages/alert/Alerts.json"
 # Returns a JSON array of {"label": "<Hebrew city name>", "value": "..."} objects.
-CITIES_URL = "https://www.oref.org.il/Shared/Ajax/GetCitiesMix.aspx?lang=he"
+# Uses the alerts-history subdomain which is more permissive than www.oref.org.il.
+CITIES_URL = "https://alerts-history.oref.org.il/Shared/Ajax/GetDistricts.aspx?lang=he"
 HEADERS = {
-    "Referer": "https://www.oref.org.il/",
+    "Referer": "https://www.oref.org.il/11226-he/pakar.aspx",
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Pragma": "no-cache",
+    "Cache-Control": "max-age=0",
 }
+
+# City-name substring used by Pikud HaOref for scheduled test drills.
+# The live API fires real alerts with this token continuously; most client
+# libraries filter them out, but we expose it so callers can opt-in to use
+# them as a free end-to-end test signal.
+TEST_CITY_TOKEN = "בדיקה"
 
 # How many consecutive network failures before we warn loudly.
 _FAILURE_WARN_THRESHOLD = 5
+
+
+def _cache_bust_url(url: str) -> str:
+    """Append a Unix-timestamp query param to defeat CDN/proxy caching."""
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{int(time.time())}"
+
+
+def _decode_response(raw: bytes) -> str:
+    """Decode an alert API response, handling UTF-16-LE BOM, UTF-8 BOM, and NUL chars."""
+    if raw.startswith(b"\xff\xfe"):
+        text = raw.decode("utf-16-le")
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        text = raw[3:].decode("utf-8", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    return text.replace("\x00", "")
 
 
 async def fetch_known_areas(session: aiohttp.ClientSession) -> List[str]:
@@ -37,7 +65,7 @@ async def fetch_known_areas(session: aiohttp.ClientSession) -> List[str]:
     """
     try:
         async with session.get(
-            CITIES_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)
+            _cache_bust_url(CITIES_URL), headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             resp.raise_for_status()
             text = (await resp.text(encoding="utf-8-sig")).strip()
@@ -129,9 +157,10 @@ class AlertMonitor:
         Returns the alert dict if a *new* matching alert is found, else None.
         The API returns either an empty string (no alert) or a JSON object.
         """
-        async with session.get(ALERTS_URL, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(_cache_bust_url(ALERTS_URL), headers=HEADERS, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             resp.raise_for_status()
-            text = await resp.text(encoding="utf-8-sig")  # strip BOM if present
+            raw = await resp.read()
+            text = _decode_response(raw)
 
         text = text.strip()
         if not text:

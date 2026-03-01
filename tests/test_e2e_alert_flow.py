@@ -44,7 +44,7 @@ def _make_http_mock(text: str):
     """
     resp = AsyncMock()
     resp.raise_for_status = MagicMock()
-    resp.text = AsyncMock(return_value=text)
+    resp.read = AsyncMock(return_value=text.encode("utf-8"))
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=False)
 
