@@ -127,6 +127,18 @@ class RoomScheduler:
     def set_email(self, email: str) -> None:
         self._state["roborock_email"] = email
 
+    def get_dreame_username(self) -> Optional[str]:
+        return self._state.get("dreame_username")
+
+    def set_dreame_username(self, username: str) -> None:
+        self._state["dreame_username"] = username
+
+    def get_vacuum_type(self) -> Optional[str]:
+        return self._state.get("vacuum_type", "roborock")
+
+    def set_vacuum_type(self, vtype: str) -> None:
+        self._state["vacuum_type"] = vtype
+
     def get_cached_credentials(self) -> Dict:
         return self._state.get("roborock_cached_credentials", {})
 
@@ -199,6 +211,8 @@ class RoomScheduler:
             "last_alert_id": None,
             "last_alert_time": None,
             "roborock_email": None,
+            "dreame_username": None,
+            "vacuum_type": "roborock",
             "roborock_cached_credentials": {},
             "areas": [],
         }

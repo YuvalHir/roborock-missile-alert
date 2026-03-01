@@ -40,6 +40,7 @@ from vacuum_controller import (
     STATUS_OK,
     STATUS_ALREADY_CLEANING,
 )
+from dreame_controller import DreameController
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -231,9 +232,11 @@ class MamadService:
             max_cleans_per_window=int(cfg.get("max_cleans_per_room", 2)),
             clean_window_hours=float(cfg.get("clean_window_hours", 12.0)),
         )
-        self.vacuum = VacuumController(
-            min_battery_percent=int(cfg.get("min_battery_percent", 20)),
-        )
+        self.vacuum_type = cfg.get("vacuum_type") or self.scheduler.get_vacuum_type()
+        if self.vacuum_type == "dreame":
+            self.vacuum = DreameController(min_battery_percent=int(cfg.get("min_battery_percent", 20)))
+        else:
+            self.vacuum = VacuumController(min_battery_percent=int(cfg.get("min_battery_percent", 20)))
         self.notifier = Notifier(cfg.get("notifications", {}))
         self.alert_monitor: Optional[AlertMonitor] = None
 
@@ -243,23 +246,52 @@ class MamadService:
 
     async def run_setup(self) -> None:
         """Interactive first-run: auth, discover rooms, print them."""
-        log.info("=== MAMAD Roborock Setup ===")
+        log.info("=== MAMAD Vacuum Setup ===")
 
-        # Use stored email if available, otherwise prompt
-        email = self.scheduler.get_email()
-        if not email:
-            email = input("Enter your Roborock account email: ").strip()
+        print("Which vacuum brand do you have?")
+        print("  1. Roborock")
+        print("  2. Dreame")
+        choice = input("Enter choice (1 or 2): ").strip()
+
+        if choice == "2":
+            self.vacuum_type = "dreame"
+            self.scheduler.set_vacuum_type("dreame")
+            self.vacuum = DreameController(min_battery_percent=int(self.cfg.get("min_battery_percent", 20)))
+
+            username = self.scheduler.get_dreame_username()
+            if not username:
+                username = input("Enter your Xiaomi account email or phone (for Dreame): ").strip()
+                if not username:
+                    sys.exit("ERROR: Username is required")
+
+            creds = await self.vacuum.setup(
+                username=username,
+                cached_credentials=self.scheduler.get_cached_credentials(),
+                interactive=True,
+            )
+            self.scheduler.set_dreame_username(username)
+            self.scheduler.set_cached_credentials(creds)
+            self.scheduler.save()
+        else:
+            self.vacuum_type = "roborock"
+            self.scheduler.set_vacuum_type("roborock")
+            self.vacuum = VacuumController(min_battery_percent=int(self.cfg.get("min_battery_percent", 20)))
+
+            # Use stored email if available, otherwise prompt
+            email = self.scheduler.get_email()
             if not email:
-                sys.exit("ERROR: Email is required")
+                email = input("Enter your Roborock account email: ").strip()
+                if not email:
+                    sys.exit("ERROR: Email is required")
 
-        creds = await self.vacuum.setup(
-            email=email,
-            cached_credentials=self.scheduler.get_cached_credentials(),
-            interactive=True,
-        )
-        self.scheduler.set_email(email)
-        self.scheduler.set_cached_credentials(creds)
-        self.scheduler.save()
+            creds = await self.vacuum.setup(
+                email=email,
+                cached_credentials=self.scheduler.get_cached_credentials(),
+                interactive=True,
+            )
+            self.scheduler.set_email(email)
+            self.scheduler.set_cached_credentials(creds)
+            self.scheduler.save()
 
         # Areas setup — show known cities before prompting so the user can verify spelling
         print("\nFetching available city/area names from Pikud HaOref...")
@@ -299,20 +331,34 @@ class MamadService:
 
     async def run(self) -> None:
         """Daemon: authenticate, check state, then monitor alerts."""
-        log.info("=== MAMAD Roborock starting (daemon mode) ===")
+        log.info("=== MAMAD Vacuum starting (daemon mode) ===")
 
-        # Auth — email is stored in state file after first --setup run
-        email = self.scheduler.get_email()
-        if not email:
-            sys.exit(
-                "ERROR: No Roborock account found in state file.\n"
-                "Run setup first:  python mamad_roborock.py --setup"
+        # Auth
+        if self.vacuum_type == "dreame":
+            username = self.scheduler.get_dreame_username()
+            if not username:
+                sys.exit(
+                    "ERROR: No Xiaomi/Dreame account found in state file.\n"
+                    "Run setup first:  python mamad_roborock.py --setup"
+                )
+            creds = await self.vacuum.setup(
+                username=username,
+                cached_credentials=self.scheduler.get_cached_credentials(),
+                interactive=False,
             )
-        creds = await self.vacuum.setup(
-            email=email,
-            cached_credentials=self.scheduler.get_cached_credentials(),
-            interactive=False,
-        )
+        else:
+            email = self.scheduler.get_email()
+            if not email:
+                sys.exit(
+                    "ERROR: No Roborock account found in state file.\n"
+                    "Run setup first:  python mamad_roborock.py --setup"
+                )
+            creds = await self.vacuum.setup(
+                email=email,
+                cached_credentials=self.scheduler.get_cached_credentials(),
+                interactive=False,
+            )
+
         self.scheduler.set_cached_credentials(creds)
         self.scheduler.save()
 
@@ -645,15 +691,26 @@ async def _run_test_clean(self, room_id: int) -> None:
     """Connect, clean one room for 30 s, then dock. Used by --test-clean."""
     print(f"\nTest clean: room id={room_id} for 30 seconds\n")
 
-    email = self.scheduler.get_email()
-    if not email:
-        sys.exit("ERROR: Run --setup first")
+    if self.vacuum_type == "dreame":
+        username = self.scheduler.get_dreame_username()
+        if not username:
+            sys.exit("ERROR: Run --setup first")
+        await self.vacuum.setup(
+            username=username,
+            cached_credentials=self.scheduler.get_cached_credentials(),
+            interactive=False,
+        )
+    else:
+        email = self.scheduler.get_email()
+        if not email:
+            sys.exit("ERROR: Run --setup first")
 
-    await self.vacuum.setup(
-        email=email,
-        cached_credentials=self.scheduler.get_cached_credentials(),
-        interactive=False,
-    )
+        await self.vacuum.setup(
+            email=email,
+            cached_credentials=self.scheduler.get_cached_credentials(),
+            interactive=False,
+        )
+
     await self.vacuum.discover_devices()
 
     status = await self.vacuum.get_status()
@@ -696,15 +753,26 @@ async def _run_inject_alert(self, city: str) -> None:
     print(f"\nInjecting synthetic alert for city: '{city}'")
     print("This runs the full alert → vacuum pipeline.\n")
 
-    email = self.scheduler.get_email()
-    if not email:
-        sys.exit("ERROR: Run --setup first")
+    if self.vacuum_type == "dreame":
+        username = self.scheduler.get_dreame_username()
+        if not username:
+            sys.exit("ERROR: Run --setup first")
+        creds = await self.vacuum.setup(
+            username=username,
+            cached_credentials=self.scheduler.get_cached_credentials(),
+            interactive=False,
+        )
+    else:
+        email = self.scheduler.get_email()
+        if not email:
+            sys.exit("ERROR: Run --setup first")
 
-    creds = await self.vacuum.setup(
-        email=email,
-        cached_credentials=self.scheduler.get_cached_credentials(),
-        interactive=False,
-    )
+        creds = await self.vacuum.setup(
+            email=email,
+            cached_credentials=self.scheduler.get_cached_credentials(),
+            interactive=False,
+        )
+
     self.scheduler.set_cached_credentials(creds)
     self.scheduler.save()
 
