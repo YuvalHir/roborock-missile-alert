@@ -418,19 +418,20 @@ class MamadService:
         cities = alert.get("data", [])
         log.info("ALERT id=%s cities=%s", alert_id, cities)
 
-        if self.is_cleaning:
-            log.info("Alert ignored — already cleaning (alert id=%s)", alert_id)
+        # Query actual vacuum status — more reliable than checking self.is_cleaning flag
+        try:
+            status = await self.vacuum.get_status()
+            result = status["result"]
+        except Exception as exc:
+            log.warning("Could not get vacuum status for alert id=%s: %s", alert_id, exc)
+            await self.notifier.send(f"Alert received but couldn't check vacuum status: {exc}")
+            return
+
+        if result == STATUS_ALREADY_CLEANING:
+            log.info("Alert ignored — vacuum is actively cleaning (alert id=%s, state=%s)",
+                     alert_id, status["state"])
             await self.notifier.send(f"Alert received but vacuum is already cleaning (id={alert_id})")
             return
-
-        room = self.scheduler.get_next_room(self.rooms)
-        if room is None:
-            log.warning("No eligible rooms available for alert id=%s", alert_id)
-            await self.notifier.send("Alert received but no eligible rooms available for cleaning")
-            return
-
-        status = await self.vacuum.get_status()
-        result = status["result"]
 
         if result != STATUS_OK:
             log.warning("Skipping clean for alert id=%s — vacuum status: %s (state=%s, battery=%d%%)",
@@ -439,6 +440,12 @@ class MamadService:
                 f"Alert received but vacuum unavailable: {result} "
                 f"(state={status['state']}, battery={status['battery']}%)"
             )
+            return
+
+        room = self.scheduler.get_next_room(self.rooms)
+        if room is None:
+            log.warning("No eligible rooms available for alert id=%s", alert_id)
+            await self.notifier.send("Alert received but no eligible rooms available for cleaning")
             return
 
         self.is_cleaning = True
