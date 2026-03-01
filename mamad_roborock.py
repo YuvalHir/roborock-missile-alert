@@ -330,12 +330,15 @@ class MamadService:
         # The live API continuously fires alerts whose city name contains "בדיקה".
         # Most client libraries filter these out; we opt-in here to use them as
         # a free real-API end-to-end test without waiting for a real event.
+        alert_types = self.cfg.get("alert_types", ["1"])
         if self.cfg.get("test_mode"):
             if TEST_CITY_TOKEN not in areas:
                 areas = list(areas) + [TEST_CITY_TOKEN]
+            # In test mode, accept all alert types (tests may use any category)
+            alert_types = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
             log.warning(
                 "TEST MODE — also watching for Pikud HaOref test drills "
-                "(city contains '%s'). Disable with Ctrl-C when done testing.",
+                "(city contains '%s') and accepting all alert types. Disable with Ctrl-C when done testing.",
                 TEST_CITY_TOKEN,
             )
 
@@ -352,7 +355,7 @@ class MamadService:
         self.alert_monitor = AlertMonitor(
             areas=areas,
             poll_seconds=int(self.cfg.get("poll_seconds", 5)),
-            alert_types=self.cfg.get("alert_types", ["1"]),
+            alert_types=alert_types,
         )
 
         # Refresh rooms if cache is stale
