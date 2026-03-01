@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from alert_monitor import AlertMonitor
+from alert_monitor import AlertMonitor, fetch_known_areas, validate_configured_areas, _decode_response, _cache_bust_url
 
 
 def make_monitor(areas=None, alert_types=None):
@@ -23,7 +23,7 @@ def make_session_mock(text: str):
     """Return an aiohttp ClientSession mock that yields *text* on GET."""
     resp = AsyncMock()
     resp.raise_for_status = MagicMock()
-    resp.text = AsyncMock(return_value=text)
+    resp.read = AsyncMock(return_value=text.encode("utf-8"))
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=False)
 
@@ -163,3 +163,169 @@ class TestDeduplication:
         result = await m._poll(make_session_mock(p2))
         assert result is not None
         assert result["id"] == "2"
+
+
+# ---------------------------------------------------------------------------
+# fetch_known_areas
+# ---------------------------------------------------------------------------
+
+def make_cities_session_mock(payload: str, raise_exc=None):
+    """Return a session mock for the cities endpoint."""
+    resp = AsyncMock()
+    resp.raise_for_status = MagicMock(side_effect=raise_exc)
+    resp.text = AsyncMock(return_value=payload)
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=resp)
+    return session
+
+
+_CITIES_RESPONSE = json.dumps([
+    {"label": "תל אביב - מרכז", "value": "tel-aviv-center"},
+    {"label": "תל אביב - דרום", "value": "tel-aviv-south"},
+    {"label": "חיפה", "value": "haifa"},
+    {"label": "באר שבע", "value": "beer-sheva"},
+])
+
+
+class TestFetchKnownAreas:
+    @pytest.mark.asyncio
+    async def test_returns_label_list(self):
+        session = make_cities_session_mock(_CITIES_RESPONSE)
+        result = await fetch_known_areas(session)
+        assert "תל אביב - מרכז" in result
+        assert "חיפה" in result
+        assert len(result) == 4
+
+    @pytest.mark.asyncio
+    async def test_empty_list_response(self):
+        session = make_cities_session_mock("[]")
+        result = await fetch_known_areas(session)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_non_list_json_returns_empty(self):
+        session = make_cities_session_mock('{"error": "bad"}')
+        result = await fetch_known_areas(session)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_network_error_returns_empty(self):
+        resp = AsyncMock()
+        resp.raise_for_status = MagicMock(side_effect=Exception("timeout"))
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp)
+        result = await fetch_known_areas(session)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_items_without_label_are_skipped(self):
+        payload = json.dumps([
+            {"label": "תל אביב", "value": "ta"},
+            {"value": "no-label"},           # missing label
+            {"label": "חיפה", "value": "h"},
+        ])
+        session = make_cities_session_mock(payload)
+        result = await fetch_known_areas(session)
+        assert result == ["תל אביב", "חיפה"]
+
+
+# ---------------------------------------------------------------------------
+# validate_configured_areas
+# ---------------------------------------------------------------------------
+
+_KNOWN = ["תל אביב - מרכז", "תל אביב - דרום", "חיפה", "באר שבע", "ירושלים"]
+
+
+class TestValidateConfiguredAreas:
+    def test_all_valid_returns_empty(self):
+        assert validate_configured_areas(["תל אביב", "חיפה"], _KNOWN) == []
+
+    def test_exact_match_is_valid(self):
+        assert validate_configured_areas(["חיפה"], _KNOWN) == []
+
+    def test_substring_match_is_valid(self):
+        # "תל אביב" is a substring of "תל אביב - מרכז"
+        assert validate_configured_areas(["תל אביב"], _KNOWN) == []
+
+    def test_typo_is_flagged(self):
+        bad = validate_configured_areas(["תל אבייב"], _KNOWN)  # extra yod
+        assert "תל אבייב" in bad
+
+    def test_completely_unknown_area_flagged(self):
+        bad = validate_configured_areas(["eilat"], _KNOWN)
+        assert "eilat" in bad
+
+    def test_case_insensitive(self):
+        assert validate_configured_areas(["TEL AVIV"], ["Tel Aviv - Center"]) == []
+
+    def test_mixed_valid_and_invalid(self):
+        bad = validate_configured_areas(["חיפה", "tzfat"], _KNOWN)
+        assert bad == ["tzfat"]
+
+    def test_empty_configured_returns_empty(self):
+        assert validate_configured_areas([], _KNOWN) == []
+
+    def test_empty_known_flags_everything(self):
+        # If the city list couldn't be fetched, known=[] → don't call this
+        # (callers skip validation), but the function itself flags all areas.
+        bad = validate_configured_areas(["חיפה"], [])
+        assert "חיפה" in bad
+
+
+# ---------------------------------------------------------------------------
+# _decode_response — encoding edge cases
+# ---------------------------------------------------------------------------
+
+class TestDecodeResponse:
+    def test_plain_utf8(self):
+        raw = "hello".encode("utf-8")
+        assert _decode_response(raw) == "hello"
+
+    def test_utf8_bom_stripped(self):
+        raw = b"\xef\xbb\xbf" + "שלום".encode("utf-8")
+        assert _decode_response(raw) == "שלום"
+
+    def test_utf16_le_bom(self):
+        raw = "שלום".encode("utf-16-le")
+        raw = b"\xff\xfe" + raw
+        assert "שלום" in _decode_response(raw)
+
+    def test_nul_chars_stripped(self):
+        raw = b'{"id": "1"\x00, "cat": "1"}'
+        result = _decode_response(raw)
+        assert "\x00" not in result
+        assert '"id": "1"' in result
+
+    def test_empty_bytes(self):
+        assert _decode_response(b"") == ""
+
+
+# ---------------------------------------------------------------------------
+# Cache-bust URL parameter
+# ---------------------------------------------------------------------------
+
+class TestCacheBustUrl:
+    @pytest.mark.asyncio
+    async def test_poll_uses_cache_bust_param(self):
+        """session.get must receive a URL with a ?<timestamp> cache-bust query param."""
+        m = make_monitor()
+        payload = json.dumps({"id": "1", "cat": "1", "data": ["תל אביב"]})
+        session = make_session_mock(payload)
+        await m._poll(session)
+        url_called = session.get.call_args[0][0]
+        assert "?" in url_called, f"Expected cache-bust param in URL, got: {url_called}"
+
+    def test_url_without_query_uses_question_mark(self):
+        result = _cache_bust_url("https://example.com/path")
+        assert "?" in result
+        assert "??" not in result
+
+    def test_url_with_existing_query_uses_ampersand(self):
+        result = _cache_bust_url("https://example.com/path?lang=he")
+        assert "&" in result
+        assert "??" not in result
